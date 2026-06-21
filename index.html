@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0E0E12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TurniApp">
+<meta name="description" content="Gestione Cambi Turno Aziendale">
+<title>TurniApp</title>
+
+<!-- PWA Manifest -->
+<script>
+const manifestData = {
+  name:"TurniApp — Cambi Turno", short_name:"TurniApp",
+  start_url:"./", display:"standalone",
+  background_color:"#0E0E12", theme_color:"#F4600C", orientation:"portrait",
+  icons:[{src:"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23F4600C'/><text y='.9em' font-size='72' x='12'>🚌</text></svg>",sizes:"192x192",type:"image/svg+xml"}]
+};
+const mb = new Blob([JSON.stringify(manifestData)],{type:'application/json'});
+document.write('<link rel="manifest" href="'+URL.createObjectURL(mb)+'">');
+</script>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, collection, doc, addDoc, getDocs, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, where, serverTimestamp, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getStorage, ref, uploadBytes, getDownloadURL, listAll } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-storage.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBTVm_jTzhLS1xKwGwl7PEmOpSudmaAqJY",
+    authDomain: "turniapp-9600b.firebaseapp.com",
+    projectId: "turniapp-9600b",
+    storageBucket: "turniapp-9600b.firebasestorage.app",
+    messagingSenderId: "111482878972",
+    appId: "1:111482878972:web:4596f842d5e52d2d8f9079"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  const storage = getStorage(app);
+
+  // EmailJS config
+  const EMAILJS_SERVICE = "service_bjaic8b";
+  const EMAILJS_TEMPLATE = "template_u09g5on";
+  const EMAILJS_PUBLIC_KEY = "YOUR_PUBLIC_KEY"; // ← da completare
+
+  // ── Stato globale ──
+  let currentUser = null;
+  let currentUserData = null;
+  let unsubTurni = null;
+  let unsubChat = null;
+  let deferredPrompt = null;
+
+  // ── PWA Install ──
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault(); deferredPrompt = e;
+    document.getElementById('pwa-bar').classList.add('show');
+    document.getElementById('install-banner').classList.add('show');
+  });
+
+  window.installPWA = function() {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      deferredPrompt.userChoice.then(r => {
+        if (r.outcome==='accepted') toast('✅ App installata!');
+        deferredPrompt = null;
+        document.getElementById('pwa-bar').classList.remove('show');
+        document.getElementById('install-banner').classList.remove('show');
+      });
+    } else {
+      toast('📲 Su iOS: Safari → Condividi → "Aggiungi a schermata Home"');
+    }
+  };
+
+  // ── Auth state ──
+  onAuthStateChanged(auth, async user => {
+    if (user) {
+      currentUser = user;
+      const snap = await getDoc(doc(db,'users',user.uid));
+      if (snap.exists()) {
+        currentUserData = snap.data();
+        if (!currentUserData.privacyAccepted) {
+          showScreen('s-privacy');
+        } else {
+          goApp();
+        }
+      } else {
+        await signOut(auth);
+        showScreen('s-login');
+      }
+    } else {
+      currentUser = null; currentUserData = null;
+      showScreen('s-login');
+    }
+  });
+
+  // ── LOGIN ──
+  window.doLogin = async function() {
+    const mat = document.getElementById('i-mat').value.trim();
+    const pwd = document.getElementById('i-pwd').value.trim();
+    if (!mat || !pwd) { toast('⚠️ Inserisci matricola e password'); return; }
+    document.getElementById('btn-login').textContent = 'Accesso in corso...';
+    try {
+      // Gli utenti usano matricola@turniapp.local come email fittizia
+      await signInWithEmailAndPassword(auth, mat+'@turniapp.local', pwd);
+    } catch(e) {
+      toast('❌ Matricola o password errata');
+      document.getElementById('btn-login').textContent = 'ACCEDI →';
+    }
+  };
+
+  // ── PRIVACY ──
+  window.acceptPrivacy = async function() {
+    const c1 = document.getElementById('c1').classList.contains('on');
+    const c2 = document.getElementById('c2').classList.contains('on');
+    const c3 = document.getElementById('c3').classList.contains('on');
+    if (!c1||!c2||!c3) return;
+    await updateDoc(doc(db,'users',currentUser.uid), { privacyAccepted: true, privacyDate: serverTimestamp() });
+    currentUserData.privacyAccepted = true;
+    goApp();
+  };
+
+  // ── GO APP ──
+  function goApp() {
+    // Aggiorna UI con dati utente
+    const initials = getInitials(currentUserData.nome, currentUserData.cognome);
+    document.getElementById('sb-av').textContent = initials;
+    document.getElementById('tb-av').textContent = initials;
+    document.getElementById('sb-name').textContent = currentUserData.nome + ' ' + currentUserData.cognome;
+    document.getElementById('sb-mat').textContent = 'MAT. ' + currentUserData.matricola;
+    if (currentUserData.isAdmin) {
+      document.getElementById('admin-section').style.display = 'block';
+      document.getElementById('admin-badge').style.display = 'inline-flex';
+    }
+    showScreen('s-app');
+    goPg('turni');
+    requestNotifPermission();
+    loadTurni();
+    // Deep linking
+    const hash = window.location.hash;
+    if (hash.startsWith('#turno/')) { const id = hash.replace('#turno/',''); openTurnoById(id); }
+    else if (hash.startsWith('#doc/')) { goPg('docs'); }
+    else if (hash.startsWith('#contatto/')) { goPg('rubrica'); }
+  }
+
+  function getInitials(nome, cognome) {
+    return ((nome||'?')[0] + (cognome||'?')[0]).toUpperCase();
+  }
+
+  // ── TURNI ──
+  async function loadTurni() {
+    const list = document.getElementById('turni-list');
+    list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Caricamento...</div>';
+    const oggi = new Date(); oggi.setHours(0,0,0,0);
+
+    if (unsubTurni) unsubTurni();
+    unsubTurni = onSnapshot(
+      query(collection(db,'turni'), orderBy('data','asc')),
+      snap => {
+        list.innerHTML = '';
+        let count = 0;
+        snap.forEach(d => {
+          const t = {id: d.id, ...d.data()};
+          const dataT = t.data.toDate ? t.data.toDate() : new Date(t.data);
+          dataT.setHours(0,0,0,0);
+          if (dataT < oggi) { deleteDoc(doc(db,'turni',d.id)); return; } // auto-delete passati
+          count++;
+          list.appendChild(buildTurnoCard(t));
+        });
+        if (count === 0) list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--muted)">Nessuna richiesta di cambio turno attiva 🎉</div>';
+      }
+    );
+  }
+
+  function buildTurnoCard(t) {
+    const div = document.createElement('div');
+    div.className = 'rcard';
+    div.id = 'turno-'+t.id;
+    const dataStr = t.data.toDate ? t.data.toDate().toLocaleDateString('it-IT',{day:'numeric',month:'short'}).toUpperCase() : t.dataStr;
+    const isOwner = currentUser && t.userId === currentUser.uid;
+    const initials = getInitials(t.nome, t.cognome);
+    const colors = ['#E67E22','#27AE60','#8E44AD','#2980B9','#C0392B','#16A085'];
+    const color = colors[t.matricola ? parseInt(t.matricola) % colors.length : 0];
+
+    let proposte = '';
+    if (t.proposte && t.proposte.length > 0) {
+      const propItems = t.proposte.map(p => {
+        const isPending = t.confermato1 && t.confermato1===p.userId && !t.confermato2;
+        const isConfirmed = t.confermato1 && t.confermato2;
+        const isMine = currentUser && p.userId === currentUser.uid;
+        let badge = '';
+        if (isConfirmed) badge = '<span class="confirmed-badge">✅ CONCORDATO</span>';
+        else if (isPending && isMine) badge = `<button class="btn-confirm" onclick="window.finalConfirm('${t.id}','${p.userId}')">✅ CONFERMO</button>`;
+        else if (isPending) badge = '<span class="pending-badge">⏳ ATTESA</span>';
+        else if (isOwner && !t.confermato1) badge = `<button class="btn-confirm" onclick="window.openConfirm('${t.id}','${p.userId}','${p.nome} ${p.cognome}','${p.turno}')">SCEGLI</button>`;
+        return `<div class="prop-item ${isMine?'mine':''}">
+          <div class="prop-dot" style="background:${isConfirmed?'var(--green)':isPending?'var(--yellow)':'var(--green)'}"></div>
+          <div class="prop-info"><div class="prop-name">${p.nome} ${p.cognome}</div><div class="prop-detail">${p.turno}</div></div>
+          ${badge}
+        </div>`;
+      }).join('');
+      proposte = `<div class="props-sec">
+        <div class="props-title">${t.proposte.length} Proposta/e ricevuta/e</div>
+        ${propItems}
+        ${!isOwner && !t.confermato1 ? `<button class="btn-propose" onclick="window.openProposta('${t.id}','${t.nome}','${t.cognome}')">+ CONTROPROPOSTA</button>` : ''}
+      </div>`;
+    } else {
+      proposte = `<div class="props-sec">
+        <div class="props-title">Nessuna proposta ancora</div>
+        ${!isOwner ? `<button class="btn-propose" onclick="window.openProposta('${t.id}','${t.nome}','${t.cognome}')">+ CONTROPROPOSTA</button>` : ''}
+      </div>`;
+    }
+
+    // Link diretto
+    const link = window.location.origin + window.location.pathname + '#turno/' + t.id;
+
+    div.innerHTML = `
+      <div class="rcard-accent"></div>
+      <div class="rcard-body">
+        <div class="rcard-head">
+          <div class="ru">
+            <div class="rav" style="background:linear-gradient(135deg,${color},${color}aa)">${initials}</div>
+            <div><div class="rname">${t.nome} ${t.cognome}</div><div class="rmat">MAT. ${t.matricola}</div></div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <span onclick="copyLink('${link}')" style="cursor:pointer;font-size:16px;opacity:.6" title="Copia link">🔗</span>
+            <div class="rdate">${dataStr}</div>
+          </div>
+        </div>
+        <div class="rrows">
+          <div class="rrow"><span class="rrlabel">🔴 Cedo</span><span class="rrval">${t.cedo}</span></div>
+          <div class="rrow"><span class="rrlabel">🟢 Cerco</span><span class="rrval">${t.cerco}</span></div>
+          ${t.note ? `<div class="rrow"><span class="rrlabel">📝 Note</span><span class="rrval rrnote">${t.note}</span></div>` : ''}
+        </div>
+        ${isOwner ? `<div style="text-align:right;padding:0 0 10px;"><span style="font-size:11px;color:var(--orange);cursor:pointer;" onclick="deleteTurno('${t.id}')">🗑 Elimina richiesta</span></div>` : ''}
+      </div>
+      ${proposte}
+      <div class="chat-sec">
+        <div class="chat-toggle" onclick="toggleChat('chat-${t.id}')">
+          <div class="chat-toggle-left">💬 Chat pubblica</div>
+          <span class="chat-arrow" id="arrow-chat-${t.id}">▼</span>
+        </div>
+        <div class="chat-body" id="chat-${t.id}">
+          <div class="chat-msgs" id="msgs-${t.id}"></div>
+          <div class="chat-input-row">
+            <input class="chat-input" id="ci-${t.id}" type="text" placeholder="Scrivi un messaggio..." onkeydown="if(event.key==='Enter')window.sendMsg('${t.id}')">
+            <button class="btn-send" onclick="window.sendMsg('${t.id}')">➤</button>
+          </div>
+        </div>
+      </div>`;
+    return div;
+  }
+
+  // ── NUOVA RICHIESTA ──
+  window.submitReq = async function() {
+    const cedo = document.getElementById('m-cedo').value.trim();
+    const cerco = document.getElementById('m-cerco').value.trim();
+    const dataVal = document.getElementById('m-data').value;
+    const note = document.getElementById('m-note').value.trim();
+    if (!cedo||!cerco||!dataVal) { toast('⚠️ Compila data, turno ceduto e turno cercato'); return; }
+    try {
+      await addDoc(collection(db,'turni'), {
+        userId: currentUser.uid,
+        nome: currentUserData.nome,
+        cognome: currentUserData.cognome,
+        matricola: currentUserData.matricola,
+        cedo, cerco, note,
+        data: Timestamp.fromDate(new Date(dataVal)),
+        dataStr: new Date(dataVal).toLocaleDateString('it-IT',{day:'numeric',month:'short'}).toUpperCase(),
+        proposte: [],
+        createdAt: serverTimestamp()
+      });
+      toast('✅ Richiesta pubblicata!');
+      closeModal('m-new');
+      document.getElementById('m-cedo').value='';
+      document.getElementById('m-cerco').value='';
+      document.getElementById('m-note').value='';
+    } catch(e) { toast('❌ Errore: '+e.message); }
+  };
+
+  // ── CONTROPROPOSTA ──
+  window.openProposta = function(turnoId, nomeOwner, cognomeOwner) {
+    document.getElementById('prop-turno-id').value = turnoId;
+    document.getElementById('prop-owner').textContent = nomeOwner + ' ' + cognomeOwner;
+    document.getElementById('m-proposta').classList.add('open');
+  };
+
+  window.submitProposta = async function() {
+    const turnoId = document.getElementById('prop-turno-id').value;
+    const turno = document.getElementById('prop-turno').value.trim();
+    if (!turno) { toast('⚠️ Scrivi il tuo turno'); return; }
+    try {
+      const ref = doc(db,'turni',turnoId);
+      const snap = await getDoc(ref);
+      const data = snap.data();
+      const proposte = data.proposte || [];
+      // Controlla se ha già fatto proposta
+      if (proposte.find(p => p.userId===currentUser.uid)) { toast('⚠️ Hai già inviato una proposta'); return; }
+      proposte.push({ userId:currentUser.uid, nome:currentUserData.nome, cognome:currentUserData.cognome, matricola:currentUserData.matricola, turno });
+      await updateDoc(ref, { proposte });
+      toast('✅ Proposta inviata!');
+      closeModal('m-proposta');
+      document.getElementById('prop-turno').value='';
+    } catch(e) { toast('❌ Errore: '+e.message); }
+  };
+
+  // ── DOPPIA CONFERMA (passo 1: il richiedente sceglie) ──
+  window.openConfirm = function(turnoId, propUserId, propNome, propTurno) {
+    document.getElementById('cf-turno-id').value = turnoId;
+    document.getElementById('cf-prop-user-id').value = propUserId;
+    document.getElementById('cf-name').textContent = propNome;
+    document.getElementById('cf-date').textContent = propTurno;
+    document.getElementById('m-confirm').classList.add('open');
+  };
+
+  window.confirmOk = async function() {
+    const turnoId = document.getElementById('cf-turno-id').value;
+    const propUserId = document.getElementById('cf-prop-user-id').value;
+    try {
+      await updateDoc(doc(db,'turni',turnoId), { confermato1: propUserId, confermato1At: serverTimestamp() });
+      toast('🤝 Proposta scelta! Attendi la conferma del collega...');
+      closeModal('m-confirm');
+    } catch(e) { toast('❌ Errore: '+e.message); }
+  };
+
+  // ── DOPPIA CONFERMA (passo 2: il collega conferma) ──
+  window.finalConfirm = async function(turnoId, propUserId) {
+    try {
+      const ref = doc(db,'turni',turnoId);
+      const snap = await getDoc(ref);
+      const t = snap.data();
+      await updateDoc(ref, { confermato2: currentUser.uid, confermato2At: serverTimestamp() });
+      // Invia email
+      const proposta = t.proposte.find(p => p.userId===propUserId);
+      await sendEmail({
+        nome1: t.nome + ' ' + t.cognome,
+        matricola1: t.matricola,
+        turno_cedo1: t.cedo,
+        nome2: proposta.nome + ' ' + proposta.cognome,
+        matricola2: proposta.matricola,
+        turno_cedo2: proposta.turno,
+        data_cambio: t.dataStr,
+        data_conferma: new Date().toLocaleDateString('it-IT')
+      });
+      toast('✅ Cambio confermato! Email inviata all\'azienda.');
+    } catch(e) { toast('❌ Errore: '+e.message); }
+  };
+
+  // ── ELIMINA TURNO ──
+  window.deleteTurno = async function(id) {
+    if (!confirm('Eliminare questa richiesta?')) return;
+    await deleteDoc(doc(db,'turni',id));
+    toast('🗑 Richiesta eliminata');
+  };
+
+  // ── CHAT ──
+  window.toggleChat = function(chatId) {
+    const body = document.getElementById(chatId);
+    const arrow = document.getElementById('arrow-'+chatId);
+    const isOpen = body.classList.contains('open');
+    body.classList.toggle('open', !isOpen);
+    arrow.classList.toggle('open', !isOpen);
+    if (!isOpen) {
+      const turnoId = chatId.replace('chat-','');
+      loadChat(turnoId);
+    }
+  };
+
+  function loadChat(turnoId) {
+    const msgs = document.getElementById('msgs-'+turnoId);
+    if (!msgs) return;
+    if (unsubChat) unsubChat();
+    unsubChat = onSnapshot(
+      query(collection(db,'turni',turnoId,'chat'), orderBy('createdAt','asc')),
+      snap => {
+        msgs.innerHTML = '';
+        snap.forEach(d => {
+          const m = d.data();
+          const isMine = currentUser && m.userId === currentUser.uid;
+          const initials = getInitials(m.nome, m.cognome);
+          const time = m.createdAt ? m.createdAt.toDate().toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit'}) : '';
+          const div = document.createElement('div');
+          div.className = 'cmsg'+(isMine?' mine':'');
+          div.innerHTML = `<div class="cmsg-av">${initials}</div>
+            <div class="cmsg-bubble">
+              ${!isMine?`<div class="cmsg-name">${m.nome} ${m.cognome}</div>`:''}
+              <div class="cmsg-text">${m.testo}</div>
+              <div class="cmsg-time">${time}</div>
+            </div>`;
+          msgs.appendChild(div);
+        });
+        msgs.scrollTop = msgs.scrollHeight;
+      }
+    );
+  }
+
+  window.sendMsg = async function(turnoId) {
+    const inp = document.getElementById('ci-'+turnoId);
+    const testo = inp.value.trim();
+    if (!testo) return;
+    inp.value = '';
+    await addDoc(collection(db,'turni',turnoId,'chat'), {
+      userId: currentUser.uid,
+      nome: currentUserData.nome,
+      cognome: currentUserData.cognome,
+      testo,
+      createdAt: serverTimestamp()
+    });
+  };
+
+  // ── DOCUMENTI ──
+  window.loadDocs = async function() {
+    const grid = document.getElementById('dgrid');
+    grid.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">Caricamento...</div>';
+    try {
+      const snap = await getDocs(collection(db,'documenti'));
+      grid.innerHTML = '';
+      snap.forEach(d => {
+        const doc = {id:d.id,...d.data()};
+        const ext = doc.nome.split('.').pop().toLowerCase();
+        const tipo = ['pdf'].includes(ext)?'pdf':['mp4','mov','avi'].includes(ext)?'video':['jpg','jpeg','png','gif'].includes(ext)?'img':'file';
+        const icone = {pdf:'📄',video:'🎬',img:'🖼️',file:'📎'};
+        const div = document.createElement('div');
+        div.className = 'dcard';
+        div.setAttribute('data-nome', doc.nome.toLowerCase());
+        div.innerHTML = `<div class="dtag ${tipo}">${ext.toUpperCase()}</div>
+          <div class="dicon">${icone[tipo]}</div>
+          <div class="dname">${doc.nome}</div>
+          <div class="dmeta">${doc.size||''}</div>
+          <div style="display:flex;gap:6px;margin-top:8px;">
+            <button onclick="window.open('${doc.url}','_blank')" style="flex:1;padding:7px;background:rgba(244,96,12,.12);border:1px solid rgba(244,96,12,.3);border-radius:9px;color:var(--orange);font-size:12px;cursor:pointer;">👁 Apri</button>
+            <a href="${doc.url}" download style="flex:1;padding:7px;background:var(--card2);border:1px solid var(--border);border-radius:9px;color:var(--muted);font-size:12px;cursor:pointer;text-decoration:none;text-align:center;">⬇ Scarica</a>
+          </div>`;
+        grid.appendChild(div);
+      });
+      if (snap.empty) grid.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">Nessun documento caricato</div>';
+    } catch(e) { grid.innerHTML = '<div style="color:var(--red);padding:20px">Errore caricamento</div>'; }
+  };
+
+  window.filterDocs = function(q) {
+    document.querySelectorAll('.dcard').forEach(c => {
+      c.style.display = (c.dataset.nome||'').includes(q.toLowerCase()) ? '' : 'none';
+    });
+  };
+
+  // Upload documenti (solo admin)
+  window.uploadDoc = async function() {
+    const file = document.getElementById('file-input').files[0];
+    if (!file) return;
+    toast('⏳ Caricamento in corso...');
+    try {
+      const storageRef = ref(storage, 'documenti/'+file.name);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
+      await addDoc(collection(db,'documenti'), {
+        nome: file.name,
+        url,
+        size: (file.size/1024/1024).toFixed(1)+' MB',
+        createdAt: serverTimestamp()
+      });
+      toast('✅ Documento caricato!');
+      loadDocs();
+    } catch(e) { toast('❌ Errore: '+e.message); }
+  };
+
+  // ── RUBRICA ──
+  window.loadRubrica = async function() {
+    const list = document.getElementById('clist');
+    list.innerHTML = '<div style="text-align:center;padding:30px;color:var(--muted)">Caricamento...</div>';
+    try {
+      const snap = await getDocs(query(collection(db,'users'), orderBy('cognome','asc')));
+      list.innerHTML = '';
+      snap.forEach(d => {
+        const u = {id:d.id,...d.data()};
+        if (!u.inRubrica && !u.isAdmin) return;
+        const initials = getInitials(u.nome, u.cognome);
+        const link = window.location.origin + window.location.pathname + '#contatto/' + d.id;
+        const div = document.createElement('div');
+        div.className = 'ccard';
+        div.setAttribute('data-s', (u.cognome+' '+u.nome+' '+u.matricola).toLowerCase());
+        div.innerHTML = `<div class="cav">${initials}</div>
+          <div class="cinfo">
+            <div class="cname">${u.cognome} ${u.nome}</div>
+            <div class="cmat">MAT. ${u.matricola} ${u.isAdmin?'<span class="abadge">Admin</span>':''}</div>
+            ${u.telefono?`<a class="cphone" href="tel:${u.telefono}">📞 ${u.telefono}</a>`:''}
+          </div>
+          <span onclick="copyLink('${link}')" style="cursor:pointer;font-size:16px;opacity:.5">🔗</span>`;
+        list.appendChild(div);
+      });
+    } catch(e) { list.innerHTML = '<div style="color:var(--red);padding:20px">Errore caricamento</div>'; }
+  };
+
+  window.filterContacts = function(q) {
+    document.querySelectorAll('#clist .ccard').forEach(c => {
+      c.style.display = (c.dataset.s||'').includes(q.toLowerCase()) ? '' : 'none';
+    });
+  };
+
+  // ── LOGOUT ──
+  window.doLogout = async function() {
+    if (unsubTurni) unsubTurni();
+    if (unsubChat) unsubChat();
+    await signOut(auth);
+    closeSB();
+  };
+
+  // ── EMAIL ──
+  async function sendEmail(params) {
+    try {
+      await emailjs.send(EMAILJS_SERVICE, EMAILJS_TEMPLATE, params);
+    } catch(e) { console.error('EmailJS error:', e); }
+  }
+
+  // ── DEEP LINK ──
+  async function openTurnoById(id) {
+    goPg('turni');
+    setTimeout(() => {
+      const el = document.getElementById('turno-'+id);
+      if (el) el.scrollIntoView({behavior:'smooth', block:'center'});
+    }, 1000);
+  }
+
+  // ── COPY LINK ──
+  window.copyLink = function(link) {
+    navigator.clipboard.writeText(link).then(() => toast('🔗 Link copiato!'));
+  };
+
+  // ── NOTIFICHE ──
+  function requestNotifPermission() {
+    if ('Notification' in window && Notification.permission==='default') {
+      Notification.requestPermission().then(p => {
+        if (p==='granted') toast('🔔 Notifiche attivate!');
+      });
+    }
+  }
+
+  // ── SERVICE WORKER ──
+  if ('serviceWorker' in navigator) {
+    const swCode = `
+      const CACHE='turniapp-v1';
+      self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(c=>c.addAll(['./']))));
+      self.addEventListener('fetch',e=>e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).catch(()=>caches.match('./')))));
+    `;
+    const swBlob = new Blob([swCode],{type:'text/javascript'});
+    navigator.serviceWorker.register(URL.createObjectURL(swBlob)).catch(()=>{});
+  }
+
+  // Esponi funzioni globali per HTML
+  window.firebaseReady = true;
+</script>
+
+<!-- EmailJS -->
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js"></script>
+<script>
+  window.addEventListener('load', () => {
+    if (typeof emailjs !== 'undefined') emailjs.init("YOUR_PUBLIC_KEY"); // ← da completare
+  });
+</script>
+
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --orange:#F4600C;--orange2:#C0390A;
+  --dark:#0E0E12;--dark2:#16161D;--dark3:#1E1E28;
+  --card:#1A1A24;--card2:#22222E;--card3:#2A2A38;
+  --border:rgba(255,255,255,0.07);--border2:rgba(255,255,255,0.12);
+  --text:#F0EFE8;--muted:#8A8A9A;--muted2:#5A5A6A;
+  --green:#2ECC71;--red:#E74C3C;--blue:#3498DB;--yellow:#F39C12;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{height:100%;overflow:hidden;}
+body{font-family:'DM Sans',sans-serif;background:var(--dark);color:var(--text);font-size:15px;}
+.screen{display:none;position:fixed;inset:0;flex-direction:column;overflow:hidden;}
+.screen.active{display:flex;}
+
+/* LOGIN */
+#s-login{background:var(--dark);align-items:center;justify-content:center;padding:28px 22px;overflow-y:auto;}
+.login-bg{position:absolute;inset:0;pointer-events:none;overflow:hidden;}
+.lg-glow{position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,rgba(244,96,12,.18) 0%,transparent 70%);top:-100px;left:50%;transform:translateX(-50%);animation:lgPulse 5s ease-in-out infinite;}
+@keyframes lgPulse{0%,100%{opacity:.5;transform:translateX(-50%) scale(1);}50%{opacity:1;transform:translateX(-50%) scale(1.12);}}
+.bus-bg{position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:130%;opacity:.035;}
+.road{position:absolute;bottom:0;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,var(--orange),transparent);animation:roadAnim 3s ease-in-out infinite;}
+@keyframes roadAnim{0%,100%{opacity:.2;}50%{opacity:.7;}}
+.lcard{position:relative;z-index:2;width:100%;max-width:390px;}
+.llogo{text-align:center;margin-bottom:36px;animation:fadeD .8s ease both;}
+.llogo-icon{width:78px;height:78px;margin:0 auto 14px;background:linear-gradient(135deg,var(--orange),var(--orange2));border-radius:22px;display:flex;align-items:center;justify-content:center;font-size:38px;box-shadow:0 0 40px rgba(244,96,12,.35),0 8px 28px rgba(0,0,0,.4);}
+.llogo h1{font-family:'Bebas Neue',sans-serif;font-size:44px;letter-spacing:5px;background:linear-gradient(135deg,#fff 40%,var(--orange));-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+.llogo p{color:var(--muted);font-size:12px;letter-spacing:2.5px;text-transform:uppercase;margin-top:3px;}
+.install-banner{display:none;background:linear-gradient(135deg,rgba(244,96,12,.15),rgba(244,96,12,.05));border:1px solid rgba(244,96,12,.3);border-radius:13px;padding:12px 14px;margin-bottom:16px;gap:10px;align-items:center;}
+.install-banner.show{display:flex;}
+.install-banner p{font-size:12px;color:var(--text);flex:1;line-height:1.5;}
+.install-banner button{background:var(--orange);border:none;border-radius:9px;padding:8px 14px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:1px;cursor:pointer;white-space:nowrap;}
+.lform{background:var(--card);border:1px solid var(--border);border-radius:24px;padding:30px 22px;animation:fadeU .8s .2s ease both;box-shadow:0 24px 60px rgba(0,0,0,.45);}
+.fl{display:block;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:7px;}
+.fw{position:relative;margin-bottom:18px;}
+.fw .fi{position:absolute;left:15px;top:50%;transform:translateY(-50%);font-size:17px;color:var(--muted);pointer-events:none;}
+.fw input{width:100%;background:var(--dark2);border:1px solid var(--border);border-radius:13px;padding:15px 15px 15px 46px;font-family:'DM Mono',monospace;font-size:15px;color:var(--text);outline:none;transition:border-color .2s,box-shadow .2s;}
+.fw input:focus{border-color:var(--orange);box-shadow:0 0 0 3px rgba(244,96,12,.18);}
+.fw input::placeholder{color:#3a3a4a;}
+.btn-main{width:100%;padding:17px;background:linear-gradient(135deg,var(--orange),var(--orange2));border:none;border-radius:13px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:3px;cursor:pointer;margin-top:6px;box-shadow:0 8px 24px rgba(244,96,12,.4);transition:transform .15s,box-shadow .15s;}
+.btn-main:active{transform:scale(.97);}
+.pnote{text-align:center;margin-top:18px;font-size:12px;color:var(--muted);line-height:1.6;animation:fadeU .8s .4s ease both;}
+.pnote a{color:var(--orange);text-decoration:none;}
+@keyframes fadeD{from{opacity:0;transform:translateY(-18px);}to{opacity:1;transform:translateY(0);}}
+@keyframes fadeU{from{opacity:0;transform:translateY(18px);}to{opacity:1;transform:translateY(0);}}
+
+/* PRIVACY */
+#s-privacy{background:var(--dark);overflow:hidden;}
+.priv-head{background:var(--card);border-bottom:1px solid var(--border);padding:18px 22px;display:flex;align-items:center;gap:11px;flex-shrink:0;}
+.priv-head h2{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:2px;color:var(--orange);}
+.priv-body{flex:1;overflow-y:auto;padding:22px;-webkit-overflow-scrolling:touch;}
+.psec{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:14px;}
+.psec h3{font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--orange);margin-bottom:9px;}
+.psec p{font-size:13px;color:var(--muted);line-height:1.75;}
+.priv-foot{padding:18px 22px 32px;background:var(--dark2);border-top:1px solid var(--border);flex-shrink:0;}
+.chk-row{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px;}
+.cbox{width:24px;height:24px;border:2px solid var(--orange);border-radius:7px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;transition:background .2s;}
+.cbox.on{background:var(--orange);}
+.cbox .ck{font-size:13px;display:none;}
+.cbox.on .ck{display:block;}
+.chk-row span{font-size:13px;color:var(--text);line-height:1.55;}
+.btn-acc{width:100%;padding:17px;background:var(--card2);border:1px solid var(--border);border-radius:13px;color:var(--muted);font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:3px;cursor:not-allowed;transition:all .3s;}
+.btn-acc.on{background:linear-gradient(135deg,var(--orange),var(--orange2));border-color:transparent;color:#fff;cursor:pointer;box-shadow:0 8px 24px rgba(244,96,12,.4);}
+
+/* APP */
+#s-app{background:var(--dark);}
+.pwa-bar{display:none;background:linear-gradient(135deg,rgba(244,96,12,.18),rgba(244,96,12,.06));border-bottom:1px solid rgba(244,96,12,.25);padding:10px 14px;align-items:center;gap:10px;flex-shrink:0;}
+.pwa-bar.show{display:flex;}
+.pwa-bar p{font-size:12px;color:var(--text);flex:1;line-height:1.4;}
+.pwa-bar p strong{color:var(--orange);}
+.btn-install{background:var(--orange);border:none;border-radius:9px;padding:7px 14px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:14px;letter-spacing:1px;cursor:pointer;}
+.pwa-close{color:var(--muted);font-size:18px;cursor:pointer;padding:4px;}
+.topbar{position:fixed;top:0;left:0;right:0;z-index:100;height:58px;background:rgba(14,14,18,.96);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 14px;gap:11px;}
+.btn-menu{width:38px;height:38px;background:var(--card);border:1px solid var(--border);border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:17px;flex-shrink:0;}
+.tb-title{font-family:'Bebas Neue',sans-serif;font-size:21px;letter-spacing:3px;background:linear-gradient(135deg,#fff,var(--orange));-webkit-background-clip:text;-webkit-text-fill-color:transparent;flex:1;}
+.tb-notif{position:relative;width:36px;height:36px;background:var(--card);border:1px solid var(--border);border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:18px;}
+.notif-dot{position:absolute;top:6px;right:7px;width:8px;height:8px;background:var(--orange);border-radius:50%;border:2px solid var(--dark);}
+.tb-av{width:34px;height:34px;background:linear-gradient(135deg,var(--orange),var(--orange2));border-radius:10px;display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:15px;color:#fff;cursor:pointer;}
+.sb-ov{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.65);backdrop-filter:blur(5px);opacity:0;pointer-events:none;transition:opacity .3s;}
+.sb-ov.open{opacity:1;pointer-events:all;}
+.sidebar{position:fixed;top:0;left:0;bottom:0;z-index:201;width:275px;background:var(--dark2);border-right:1px solid var(--border);transform:translateX(-100%);transition:transform .35s cubic-bezier(.4,0,.2,1);display:flex;flex-direction:column;}
+.sidebar.open{transform:translateX(0);}
+.sb-head{padding:58px 22px 20px;border-bottom:1px solid var(--border);}
+.sb-ubadge{display:flex;align-items:center;gap:13px;}
+.sb-av{width:46px;height:46px;background:linear-gradient(135deg,var(--orange),var(--orange2));border-radius:13px;display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:21px;color:#fff;box-shadow:0 4px 16px rgba(244,96,12,.4);}
+.sb-name{font-size:15px;font-weight:600;}
+.sb-mat{font-family:'DM Mono',monospace;font-size:11px;color:var(--orange);margin-top:2px;}
+.abadge{display:inline-flex;align-items:center;gap:4px;background:rgba(244,96,12,.15);border:1px solid rgba(244,96,12,.3);border-radius:7px;padding:2px 8px;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--orange);margin-top:4px;}
+#admin-badge{display:none;}
+.sb-nav{flex:1;padding:14px 10px;overflow-y:auto;}
+.nlabel{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);padding:7px 12px 5px;}
+.ni{display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:13px;cursor:pointer;transition:background .2s;margin-bottom:3px;color:var(--muted);font-size:14px;font-weight:500;position:relative;}
+.ni:hover,.ni.on{background:var(--card);color:var(--text);}
+.ni.on{color:var(--orange);}
+.ni.on::before{content:'';position:absolute;left:0;top:22%;bottom:22%;width:3px;background:var(--orange);border-radius:0 3px 3px 0;}
+.ni .ic{font-size:19px;width:23px;text-align:center;}
+#admin-section{display:none;}
+.sb-foot{padding:14px 10px 32px;border-top:1px solid var(--border);}
+.btn-lo{display:flex;align-items:center;gap:12px;width:100%;padding:13px 15px;background:rgba(231,76,60,.1);border:1px solid rgba(231,76,60,.2);border-radius:13px;color:var(--red);font-size:14px;font-weight:500;cursor:pointer;}
+.main{flex:1;margin-top:58px;overflow-y:auto;padding:18px 15px 90px;-webkit-overflow-scrolling:touch;}
+.bnav{position:fixed;bottom:0;left:0;right:0;height:70px;background:rgba(14,14,18,.97);backdrop-filter:blur(20px);border-top:1px solid var(--border);display:flex;z-index:100;}
+.bni{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;color:var(--muted);font-size:10px;letter-spacing:.5px;text-transform:uppercase;position:relative;}
+.bni.on{color:var(--orange);}
+.bni.on::before{content:'';position:absolute;top:0;left:20%;right:20%;height:2px;background:var(--orange);border-radius:0 0 4px 4px;}
+.bni .bic{font-size:21px;}
+.fab{position:fixed;bottom:82px;right:18px;width:56px;height:56px;background:linear-gradient(135deg,var(--orange),var(--orange2));border-radius:17px;display:flex;align-items:center;justify-content:center;font-size:26px;color:#fff;box-shadow:0 8px 24px rgba(244,96,12,.5);cursor:pointer;z-index:99;transition:transform .15s;}
+.fab:active{transform:scale(.92);}
+.page{display:none;}
+.page.on{display:block;}
+.stitle{font-family:'Bebas Neue',sans-serif;font-size:27px;letter-spacing:3px;margin-bottom:3px;}
+.ssub{font-size:11px;color:var(--muted);letter-spacing:1px;margin-bottom:18px;text-transform:uppercase;}
+.calstrip{display:flex;gap:7px;overflow-x:auto;padding-bottom:3px;margin-bottom:18px;scrollbar-width:none;}
+.calstrip::-webkit-scrollbar{display:none;}
+.cd{flex-shrink:0;width:50px;background:var(--card);border:1px solid var(--border);border-radius:13px;padding:9px 5px;text-align:center;cursor:pointer;}
+.cd.today{background:var(--orange);border-color:var(--orange);box-shadow:0 4px 16px rgba(244,96,12,.4);}
+.cd .dn{font-size:9px;text-transform:uppercase;letter-spacing:1px;opacity:.65;}
+.cd .dd{font-family:'Bebas Neue',sans-serif;font-size:22px;line-height:1.1;}
+.rcard{background:var(--card);border:1px solid var(--border);border-radius:20px;margin-bottom:14px;overflow:hidden;animation:cIn .4s ease both;}
+.rcard-accent{height:3px;background:linear-gradient(90deg,var(--orange),var(--orange2));}
+.rcard-body{padding:18px;}
+.rcard-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+.ru{display:flex;align-items:center;gap:10px;}
+.rav{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:16px;color:#fff;}
+.rname{font-size:14px;font-weight:600;}
+.rmat{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);}
+.rdate{font-family:'DM Mono',monospace;font-size:12px;color:var(--orange);background:rgba(244,96,12,.1);border:1px solid rgba(244,96,12,.2);padding:4px 10px;border-radius:8px;}
+.rrows{display:flex;flex-direction:column;gap:9px;margin-bottom:14px;}
+.rrow{display:flex;align-items:flex-start;gap:9px;font-size:13px;}
+.rrlabel{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);min-width:58px;padding-top:2px;}
+.rrval{color:var(--text);font-weight:500;flex:1;line-height:1.5;}
+.rrnote{color:var(--muted);font-style:italic;}
+.props-sec{border-top:1px solid var(--border);padding:14px 18px;}
+.props-title{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:10px;}
+.prop-item{background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:10px 13px;margin-bottom:8px;display:flex;align-items:center;gap:10px;}
+.prop-item.mine{border-color:rgba(244,96,12,.3);background:rgba(244,96,12,.06);}
+.prop-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.prop-info{flex:1;}
+.prop-name{font-size:13px;font-weight:500;}
+.prop-detail{font-size:11px;color:var(--muted);margin-top:2px;}
+.btn-confirm{background:linear-gradient(135deg,var(--green),#1a9c52);border:none;border-radius:9px;padding:7px 13px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:1px;cursor:pointer;white-space:nowrap;}
+.pending-badge{background:rgba(243,156,18,.15);border:1px solid rgba(243,156,18,.3);border-radius:8px;padding:3px 9px;font-size:10px;color:var(--yellow);letter-spacing:1px;white-space:nowrap;}
+.confirmed-badge{background:rgba(46,204,113,.15);border:1px solid rgba(46,204,113,.3);border-radius:8px;padding:3px 9px;font-size:10px;color:var(--green);letter-spacing:1px;white-space:nowrap;}
+.btn-propose{width:100%;padding:13px;background:rgba(244,96,12,.1);border:1px solid rgba(244,96,12,.25);border-radius:11px;color:var(--orange);font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:2px;cursor:pointer;transition:all .2s;margin-top:8px;}
+.chat-sec{border-top:1px solid var(--border);}
+.chat-toggle{display:flex;align-items:center;justify-content:space-between;padding:13px 18px;cursor:pointer;}
+.chat-toggle-left{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);}
+.chat-arrow{font-size:12px;color:var(--muted);transition:transform .3s;}
+.chat-arrow.open{transform:rotate(180deg);}
+.chat-body{display:none;padding:0 14px 14px;}
+.chat-body.open{display:block;}
+.chat-msgs{max-height:220px;overflow-y:auto;margin-bottom:10px;}
+.cmsg{display:flex;gap:8px;margin-bottom:10px;}
+.cmsg.mine{flex-direction:row-reverse;}
+.cmsg-av{width:28px;height:28px;border-radius:8px;background:linear-gradient(135deg,#444,#222);display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:12px;color:#fff;flex-shrink:0;}
+.cmsg.mine .cmsg-av{background:linear-gradient(135deg,var(--orange),var(--orange2));}
+.cmsg-bubble{background:var(--card2);border:1px solid var(--border);border-radius:12px;padding:8px 12px;max-width:75%;}
+.cmsg.mine .cmsg-bubble{background:rgba(244,96,12,.12);border-color:rgba(244,96,12,.25);}
+.cmsg-name{font-size:10px;color:var(--muted);margin-bottom:3px;}
+.cmsg-text{font-size:13px;line-height:1.5;}
+.cmsg-time{font-size:10px;color:var(--muted2);margin-top:3px;text-align:right;}
+.chat-input-row{display:flex;gap:8px;}
+.chat-input{flex:1;background:var(--card2);border:1px solid var(--border);border-radius:11px;padding:11px 13px;font-family:'DM Sans',sans-serif;font-size:13px;color:var(--text);outline:none;transition:border-color .2s;}
+.chat-input:focus{border-color:var(--orange);}
+.chat-input::placeholder{color:#3a3a4a;}
+.btn-send{width:40px;height:40px;background:linear-gradient(135deg,var(--orange),var(--orange2));border:none;border-radius:11px;color:#fff;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+@keyframes cIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+.sbar{position:relative;margin-bottom:15px;}
+.sbar input{width:100%;background:var(--card);border:1px solid var(--border);border-radius:13px;padding:13px 15px 13px 44px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;transition:border-color .2s;}
+.sbar input:focus{border-color:var(--orange);}
+.sbar input::placeholder{color:#3a3a4a;}
+.sbar .si{position:absolute;left:13px;top:50%;transform:translateY(-50%);font-size:17px;color:var(--muted);pointer-events:none;}
+.dgrid{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
+.dcard{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:15px 13px;cursor:pointer;animation:cIn .4s ease both;}
+.dtag{display:inline-block;font-size:9px;letter-spacing:1px;text-transform:uppercase;padding:2px 7px;border-radius:5px;margin-bottom:8px;}
+.dtag.pdf{background:rgba(231,76,60,.15);color:#E74C3C;}
+.dtag.video{background:rgba(52,152,219,.15);color:#3498DB;}
+.dtag.img{background:rgba(46,204,113,.15);color:#2ECC71;}
+.dtag.file{background:rgba(243,156,18,.15);color:#F39C12;}
+.dicon{font-size:30px;margin-bottom:9px;}
+.dname{font-size:12px;font-weight:500;line-height:1.45;margin-bottom:5px;}
+.dmeta{font-size:10px;color:var(--muted);}
+.ccard{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:15px;margin-bottom:9px;display:flex;align-items:center;gap:13px;animation:cIn .4s ease both;}
+.cav{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--dark3),#2a2a38);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:19px;color:var(--orange);flex-shrink:0;}
+.cinfo{flex:1;}
+.cname{font-size:15px;font-weight:600;}
+.cmat{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-top:2px;}
+.cphone{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:13px;color:var(--orange);text-decoration:none;}
+.modal-ov{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.75);backdrop-filter:blur(8px);opacity:0;pointer-events:none;transition:opacity .3s;display:flex;align-items:flex-end;}
+.modal-ov.open{opacity:1;pointer-events:all;}
+.msheet{background:var(--dark2);border:1px solid var(--border);border-radius:26px 26px 0 0;padding:0 0 40px;width:100%;transform:translateY(100%);transition:transform .4s cubic-bezier(.4,0,.2,1);max-height:92vh;overflow-y:auto;}
+.modal-ov.open .msheet{transform:translateY(0);}
+.mhandle{width:38px;height:4px;background:var(--border2);border-radius:2px;margin:13px auto 18px;}
+.mtitle{font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:3px;padding:0 22px 18px;border-bottom:1px solid var(--border);}
+.mbody{padding:18px 22px;}
+.mf{margin-bottom:16px;}
+.mf label{display:block;font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:7px;}
+.mf input,.mf textarea{width:100%;background:var(--card);border:1px solid var(--border);border-radius:11px;padding:13px 15px;font-family:'DM Sans',sans-serif;font-size:14px;color:var(--text);outline:none;transition:border-color .2s;resize:none;}
+.mf textarea{height:76px;}
+.mf input:focus,.mf textarea:focus{border-color:var(--orange);}
+.mf input::placeholder,.mf textarea::placeholder{color:#3a3a4a;}
+.msub{width:calc(100% - 44px);margin:4px 22px 0;padding:17px;background:linear-gradient(135deg,var(--orange),var(--orange2));border:none;border-radius:13px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:19px;letter-spacing:3px;cursor:pointer;box-shadow:0 8px 24px rgba(244,96,12,.4);}
+.confirm-info{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:16px;}
+.confirm-info .ci-label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:5px;}
+.confirm-info .ci-val{font-size:14px;font-weight:500;}
+.confirm-btns{display:flex;gap:10px;padding:0 22px;}
+.btn-cancel{flex:1;padding:16px;background:var(--card2);border:1px solid var(--border);border-radius:13px;color:var(--muted);font-family:'Bebas Neue',sans-serif;font-size:17px;letter-spacing:2px;cursor:pointer;}
+.btn-yes{flex:1;padding:16px;background:linear-gradient(135deg,var(--green),#1a9c52);border:none;border-radius:13px;color:#fff;font-family:'Bebas Neue',sans-serif;font-size:17px;letter-spacing:2px;cursor:pointer;}
+.toast{position:fixed;bottom:82px;left:50%;transform:translateX(-50%) translateY(14px);background:var(--card2);border:1px solid rgba(244,96,12,.4);border-radius:11px;padding:11px 18px;font-size:13px;color:var(--text);opacity:0;transition:all .3s;z-index:999;white-space:nowrap;pointer-events:none;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.upload-area{border:2px dashed var(--border);border-radius:14px;padding:24px;text-align:center;color:var(--muted);margin-bottom:16px;cursor:pointer;}
+.upload-area:active{border-color:var(--orange);}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="s-login" class="screen active">
+  <div class="login-bg">
+    <div class="lg-glow"></div>
+    <svg class="bus-bg" viewBox="0 0 900 220" fill="white" xmlns="http://www.w3.org/2000/svg">
+      <rect x="50" y="40" width="800" height="140" rx="30"/>
+      <rect x="80" y="20" width="740" height="130" rx="20"/>
+      <rect x="100" y="30" width="90" height="80" rx="6" fill="#0E0E12"/>
+      <rect x="210" y="30" width="90" height="80" rx="6" fill="#0E0E12"/>
+      <rect x="320" y="30" width="90" height="80" rx="6" fill="#0E0E12"/>
+      <rect x="430" y="30" width="90" height="80" rx="6" fill="#0E0E12"/>
+      <rect x="540" y="30" width="90" height="80" rx="6" fill="#0E0E12"/>
+      <rect x="650" y="30" width="90" height="80" rx="6" fill="#0E0E12"/>
+      <circle cx="180" cy="185" r="35"/><circle cx="720" cy="185" r="35"/>
+      <circle cx="180" cy="185" r="18" fill="#0E0E12"/><circle cx="720" cy="185" r="18" fill="#0E0E12"/>
+    </svg>
+    <div class="road"></div>
+  </div>
+  <div class="lcard">
+    <div class="llogo">
+      <div class="llogo-icon">🚌</div>
+      <h1>TURNIAPP</h1>
+      <p>Gestione Cambi Turno</p>
+    </div>
+    <div class="install-banner" id="install-banner">
+      <p>📲 <strong>Installa l'app</strong> sul telefono per accesso rapido!</p>
+      <button onclick="installPWA()">INSTALLA</button>
+    </div>
+    <div class="lform">
+      <label class="fl">Numero Matricola</label>
+      <div class="fw"><span class="fi">🪪</span><input type="text" id="i-mat" placeholder="es. 00247" inputmode="numeric"></div>
+      <label class="fl">Password</label>
+      <div class="fw"><span class="fi">🔒</span><input type="password" id="i-pwd" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()"></div>
+      <button class="btn-main" id="btn-login" onclick="doLogin()">ACCEDI →</button>
+    </div>
+    <p class="pnote">Accedendo accetti il Regolamento Interno e la Privacy Policy</p>
+  </div>
+</div>
+
+<!-- PRIVACY -->
+<div id="s-privacy" class="screen">
+  <div class="priv-head"><span>📋</span><h2>PRIMA DI INIZIARE</h2></div>
+  <div class="priv-body">
+    <div class="psec"><h3>📜 Regolamento Interno</h3><p>L'utilizzo di questa piattaforma è riservato esclusivamente ai dipendenti autorizzati. I cambi turno devono rispettare le normative contrattuali vigenti. È vietato pubblicare richieste offensive o non pertinenti. Il mancato rispetto comporta la sospensione dell'account.</p></div>
+    <div class="psec"><h3>🔐 Privacy Policy (GDPR)</h3><p>I dati personali (nome, matricola, telefono) vengono trattati esclusivamente per la gestione interna dei turni. Non vengono ceduti a terzi. Hai diritto di accesso, rettifica e cancellazione dei tuoi dati contattando l'amministratore.</p></div>
+    <div class="psec"><h3>⚠️ Comportamento Corretto</h3><p>È richiesto rispetto verso tutti i colleghi. Messaggi scorretti comporteranno il blocco immediato dell'account. L'amministratore monitora le attività sulla piattaforma.</p></div>
+  </div>
+  <div class="priv-foot">
+    <div class="chk-row"><div class="cbox" id="c1" onclick="togChk('c1')"><span class="ck">✓</span></div><span>Ho letto e accetto il <strong>Regolamento Interno</strong></span></div>
+    <div class="chk-row"><div class="cbox" id="c2" onclick="togChk('c2')"><span class="ck">✓</span></div><span>Ho letto e accetto la <strong>Privacy Policy</strong> (GDPR)</span></div>
+    <div class="chk-row"><div class="cbox" id="c3" onclick="togChk('c3')"><span class="ck">✓</span></div><span>Mi impegno a tenere un <strong>comportamento corretto</strong></span></div>
+    <button class="btn-acc" id="btn-acc" onclick="acceptPrivacy()">CONTINUA →</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="s-app" class="screen">
+  <div class="pwa-bar" id="pwa-bar">
+    <p>📲 <strong>Installa TurniApp</strong> per accesso rapido</p>
+    <button class="btn-install" onclick="installPWA()">INSTALLA</button>
+    <span class="pwa-close" onclick="document.getElementById('pwa-bar').classList.remove('show')">✕</span>
+  </div>
+  <div class="sb-ov" id="sb-ov" onclick="closeSB()"></div>
+  <div class="sidebar" id="sb">
+    <div class="sb-head">
+      <div class="sb-ubadge">
+        <div class="sb-av" id="sb-av">??</div>
+        <div>
+          <div class="sb-name" id="sb-name">Caricamento...</div>
+          <div class="sb-mat" id="sb-mat">MAT. ---</div>
+          <div class="abadge" id="admin-badge">⚡ Admin</div>
+        </div>
+      </div>
+    </div>
+    <nav class="sb-nav">
+      <div class="nlabel">Principale</div>
+      <div class="ni on" id="ni-turni" onclick="goPg('turni');closeSB()"><span class="ic">📅</span>Cambio Turni</div>
+      <div class="ni" id="ni-docs" onclick="goPg('docs');closeSB()"><span class="ic">📁</span>Documenti</div>
+      <div class="ni" id="ni-rubrica" onclick="goPg('rubrica');closeSB()"><span class="ic">📋</span>Rubrica</div>
+      <div id="admin-section">
+        <div class="nlabel" style="margin-top:8px">Amministrazione</div>
+        <div class="ni" onclick="goPg('admin');closeSB()"><span class="ic">⚙️</span>Gestisci Utenti</div>
+        <div class="ni" onclick="goPg('upload');closeSB()"><span class="ic">📤</span>Carica Documenti</div>
+      </div>
+    </nav>
+    <div class="sb-foot"><button class="btn-lo" onclick="doLogout()"><span>🚪</span> Esci dall'app</button></div>
+  </div>
+  <div class="topbar">
+    <div class="btn-menu" onclick="openSB()">☰</div>
+    <div class="tb-title" id="tb-title">CAMBIO TURNI</div>
+    <div class="tb-notif" onclick="toast('🔔 Notifiche attive')">🔔<div class="notif-dot"></div></div>
+    <div class="tb-av" id="tb-av">??</div>
+  </div>
+  <div class="main">
+    <!-- TURNI -->
+    <div class="page on" id="p-turni">
+      <div class="stitle">📅 CAMBIO TURNI</div>
+      <div class="ssub" id="cal-month"></div>
+      <div class="calstrip" id="cal-strip"></div>
+      <div id="turni-list"></div>
+    </div>
+    <!-- DOCUMENTI -->
+    <div class="page" id="p-docs">
+      <div class="stitle">📁 DOCUMENTI</div>
+      <div class="ssub">Archivio Aziendale</div>
+      <div class="sbar"><span class="si">🔍</span><input type="text" placeholder="Cerca documento..." oninput="filterDocs(this.value)"></div>
+      <div class="dgrid" id="dgrid"><div style="text-align:center;padding:30px;color:var(--muted);grid-column:1/-1">Carica la pagina...</div></div>
+    </div>
+    <!-- RUBRICA -->
+    <div class="page" id="p-rubrica">
+      <div class="stitle">📋 RUBRICA</div>
+      <div class="ssub">Dipendenti Aziendali</div>
+      <div class="sbar"><span class="si">🔍</span><input type="text" placeholder="Cerca nome o matricola..." oninput="filterContacts(this.value)"></div>
+      <div id="clist"></div>
+    </div>
+    <!-- UPLOAD (admin) -->
+    <div class="page" id="p-upload">
+      <div class="stitle">📤 CARICA FILE</div>
+      <div class="ssub">Solo Amministratore</div>
+      <div class="upload-area" onclick="document.getElementById('file-input').click()">
+        <div style="font-size:40px;margin-bottom:10px">📂</div>
+        <div>Clicca per scegliere un file</div>
+        <div style="font-size:12px;margin-top:6px">PDF, Video, Foto, Word...</div>
+      </div>
+      <input type="file" id="file-input" style="display:none" onchange="uploadDoc()">
+    </div>
+    <!-- ADMIN -->
+    <div class="page" id="p-admin">
+      <div class="stitle">⚙️ ADMIN</div>
+      <div class="ssub">Gestione Utenti</div>
+      <div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:14px;">
+        <p style="font-size:13px;color:var(--muted);line-height:1.7;">Per aggiungere nuovi utenti, bloccarli o cambiare password, usa la <strong style="color:var(--orange)">Console Firebase</strong> → Authentication → Users.<br><br>Ogni utente va aggiunto con il formato:<br><code style="color:var(--orange)">matricola@turniapp.local</code></p>
+      </div>
+    </div>
+  </div>
+  <div class="fab" id="fab" onclick="openModal('m-new')">＋</div>
+  <div class="bnav">
+    <div class="bni on" id="bn-turni" onclick="goPg('turni')"><span class="bic">📅</span>Turni</div>
+    <div class="bni" id="bn-docs" onclick="goPg('docs')"><span class="bic">📁</span>Documenti</div>
+    <div class="bni" id="bn-rubrica" onclick="goPg('rubrica')"><span class="bic">📋</span>Rubrica</div>
+  </div>
+</div>
+
+<!-- MODAL NUOVA RICHIESTA -->
+<div class="modal-ov" id="m-new" onclick="closeModalOut(event,'m-new')">
+  <div class="msheet">
+    <div class="mhandle"></div>
+    <div class="mtitle">🚌 NUOVA RICHIESTA</div>
+    <div class="mbody">
+      <div class="mf"><label>📅 Data del turno</label><input type="date" id="m-data"></div>
+      <div class="mf"><label>🔴 Turno che cedo (scrivi liberamente)</label><input type="text" id="m-cedo" placeholder="es. Notturno 22:30–06:15 linea 40"></div>
+      <div class="mf"><label>🟢 Turno che cerco (scrivi liberamente)</label><input type="text" id="m-cerco" placeholder="es. Qualsiasi mattina 05:45–13:30"></div>
+      <div class="mf"><label>📝 Note (opzionale)</label><textarea id="m-note" placeholder="Disponibilità, preferenze..."></textarea></div>
+    </div>
+    <button class="msub" onclick="submitReq()">PUBBLICA RICHIESTA 🚌</button>
+  </div>
+</div>
+
+<!-- MODAL CONTROPROPOSTA -->
+<div class="modal-ov" id="m-proposta" onclick="closeModalOut(event,'m-proposta')">
+  <div class="msheet">
+    <div class="mhandle"></div>
+    <div class="mtitle">🤝 CONTROPROPOSTA</div>
+    <div class="mbody">
+      <input type="hidden" id="prop-turno-id">
+      <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Stai rispondendo alla richiesta di <strong id="prop-owner" style="color:var(--text)"></strong></p>
+      <div class="mf"><label>🟢 Il turno che offro (scrivi liberamente)</label><input type="text" id="prop-turno" placeholder="es. Mattina 05:45–13:30 del 14 Giu"></div>
+    </div>
+    <button class="msub" onclick="submitProposta()">INVIA CONTROPROPOSTA</button>
+  </div>
+</div>
+
+<!-- MODAL DOPPIA CONFERMA -->
+<div class="modal-ov" id="m-confirm" onclick="closeModalOut(event,'m-confirm')">
+  <div class="msheet">
+    <div class="mhandle"></div>
+    <div class="mtitle">🤝 CONFERMA CAMBIO</div>
+    <div class="mbody">
+      <input type="hidden" id="cf-turno-id">
+      <input type="hidden" id="cf-prop-user-id">
+      <p style="font-size:13px;color:var(--muted);margin-bottom:16px;line-height:1.6;">Stai per scegliere questa proposta. <strong style="color:var(--text)">Anche il collega dovrà confermare</strong> prima che il cambio sia definitivo.</p>
+      <div class="confirm-info"><div class="ci-label">👤 Collega</div><div class="ci-val" id="cf-name">—</div></div>
+      <div class="confirm-info"><div class="ci-label">🔄 Turno proposto</div><div class="ci-val" id="cf-date">—</div></div>
+      <div style="background:rgba(243,156,18,.08);border:1px solid rgba(243,156,18,.2);border-radius:11px;padding:12px 14px;margin-bottom:18px;font-size:12px;color:var(--yellow);line-height:1.6;">
+        ⚠️ <em>Comunicazione automatica. L'azienda non è tenuta a rispondere. Per incongruenze contattare direttamente i dipendenti interessati.</em>
+      </div>
+    </div>
+    <div class="confirm-btns">
+      <button class="btn-cancel" onclick="closeModal('m-confirm')">ANNULLA</button>
+      <button class="btn-yes" onclick="confirmOk()">✅ SCELGO</button>
+    </div>
+    <div style="height:16px"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="_toast"></div>
+
+<script>
+// ── NAVIGAZIONE ──
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+const titles = {turni:'CAMBIO TURNI',docs:'DOCUMENTI',rubrica:'RUBRICA',admin:'AMMINISTRAZIONE',upload:'CARICA FILE'};
+function goPg(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('on'));
+  document.getElementById('p-'+name).classList.add('on');
+  ['turni','docs','rubrica'].forEach(n => {
+    document.getElementById('ni-'+n)?.classList.toggle('on',n===name);
+    document.getElementById('bn-'+n)?.classList.toggle('on',n===name);
+  });
+  document.getElementById('tb-title').textContent = titles[name]||'';
+  document.getElementById('fab').style.display = name==='turni'?'flex':'none';
+  if (name==='docs') window.loadDocs?.();
+  if (name==='rubrica') window.loadRubrica?.();
+}
+
+// ── SIDEBAR ──
+function openSB() { document.getElementById('sb').classList.add('open'); document.getElementById('sb-ov').classList.add('open'); }
+function closeSB() { document.getElementById('sb').classList.remove('open'); document.getElementById('sb-ov').classList.remove('open'); }
+
+// ── PRIVACY CHECKBOXES ──
+const cks = {c1:false,c2:false,c3:false};
+function togChk(id) {
+  cks[id]=!cks[id];
+  document.getElementById(id).classList.toggle('on',cks[id]);
+  document.getElementById('btn-acc').classList.toggle('on',cks.c1&&cks.c2&&cks.c3);
+}
+
+// ── CALENDARIO ──
+function buildCal() {
+  const strip = document.getElementById('cal-strip');
+  if (!strip) return;
+  const now = new Date();
+  const days = ['Dom','Lun','Mar','Mer','Gio','Ven','Sab'];
+  const months = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre'];
+  document.getElementById('cal-month').textContent = months[now.getMonth()]+' '+now.getFullYear()+' • Roma';
+  strip.innerHTML = '';
+  for (let i=-1; i<=16; i++) {
+    const d=new Date(now); d.setDate(now.getDate()+i);
+    const div=document.createElement('div');
+    div.className='cd'+(i===0?' today':'');
+    div.innerHTML=`<div class="dn">${days[d.getDay()]}</div><div class="dd">${d.getDate()}</div>`;
+    strip.appendChild(div);
+  }
+  setTimeout(()=>strip.querySelector('.today')?.scrollIntoView({inline:'center',behavior:'smooth'}),300);
+  document.getElementById('m-data').value = now.toISOString().split('T')[0];
+}
+buildCal();
+
+// ── MODALS ──
+function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function closeModalOut(e,id) { if(e.target===document.getElementById(id)) closeModal(id); }
+
+// ── TOAST ──
+let _tt;
+function toast(msg) {
+  const t=document.getElementById('_toast');
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(_tt); _tt=setTimeout(()=>t.classList.remove('show'),2800);
+}
+</script>
+</body>
+</html>
