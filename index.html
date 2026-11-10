@@ -197,6 +197,7 @@
     else if (hash.startsWith('#doc/')) { const id = hash.replace('#doc/',''); openDocById(id); }
     else if (hash.startsWith('#contatto/')) { goPg('rubrica'); }
     else if (hash.startsWith('#recapito/')) { goPg('rubrica'); window.switchRubricaTab?.('rec'); }
+    else if (hash.startsWith('#codici')) { goPg('codici'); setTimeout(() => window.codiciApriLink?.(hash), 150); }
   }
 
   function getInitials(nome, cognome) {
@@ -1725,12 +1726,14 @@ body{font-family:'DM Sans',sans-serif;background:var(--dark);color:var(--text);f
 .cod-tab{flex-shrink:0;padding:9px 18px;border-radius:30px;background:var(--card);border:1px solid var(--border);font-weight:800;font-size:13px;letter-spacing:.5px;color:var(--muted);white-space:nowrap;cursor:pointer;}
 .cod-tab.on{background:var(--red);border-color:var(--red);color:#fff;}
 .cod-stati{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;margin-bottom:14px;}
-.cod-stati-t{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:800;margin-bottom:10px;}
+.cod-stati-t{display:flex;justify-content:space-between;align-items:center;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);font-weight:800;margin-bottom:10px;}
 .cod-stati-g{display:flex;flex-wrap:wrap;gap:8px;}
 .cod-chip{display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.05);border-radius:10px;padding:8px 11px;font-weight:800;font-size:12.5px;color:var(--text);}
 .cod-chip b{font-family:'Bebas Neue',sans-serif;font-size:20px;color:var(--red);font-weight:400;line-height:1;}
 .cod-card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px 15px 6px;margin-bottom:11px;}
-.cod-card-h{font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:1.5px;margin-bottom:4px;color:var(--text);}
+.cod-card-h{display:flex;justify-content:space-between;align-items:center;font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:1.5px;margin-bottom:4px;color:var(--text);}
+.cod-link{cursor:pointer;font-size:16px;opacity:.5;letter-spacing:0;padding:2px 4px;}
+.cod-flash{box-shadow:0 0 0 3px var(--red);background:rgba(223,4,0,.05);}
 .cod-row{display:flex;align-items:center;gap:12px;padding:9px 0;border-top:1px solid var(--border);}
 .cod-num{font-family:'Bebas Neue',sans-serif;font-size:34px;line-height:1;color:var(--red);min-width:42px;flex-shrink:0;}
 .cod-main{flex:1;min-width:0;}
@@ -2436,6 +2439,27 @@ try { const sv = localStorage.getItem('codSys'); if (sv && CODICI_SISTEMI.some(x
 function codEsc(t){ return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function codNorm(t){ return String(t).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,''); }
 function codLinea(l){ return String(l).replace(/^0+/,'').toLowerCase(); }
+function codiciCopia(sysId, linea){
+  const link = location.origin + location.pathname + '#codici/' + encodeURIComponent(sysId) + (linea ? '/' + encodeURIComponent(linea) : '');
+  window.copyLink(link);
+}
+// apre la pagina sulla centralina (e sulla linea) indicate dal link: #codici/ameli oppure #codici/ameli/043
+function codiciApriLink(h){
+  const parti = decodeURIComponent(String(h)).replace(/^#codici\/?/,'').split('/');
+  const sys = CODICI_SISTEMI.find(x => x.id === parti[0]);
+  if (!sys) return;
+  codiciSys = sys.id;
+  document.getElementById('cod-q').value = '';
+  codiciRender();
+  if (!parti[1]) return;
+  setTimeout(() => {
+    const el = [...document.querySelectorAll('#cod-list .cod-card')].find(c => c.dataset.linea === parti[1]);
+    if (!el) return;
+    el.scrollIntoView({behavior:'smooth', block:'center'});
+    el.classList.add('cod-flash');
+    setTimeout(() => el.classList.remove('cod-flash'), 2500);
+  }, 150);
+}
 function codiciSetSys(id){
   codiciSys = id;
   try { localStorage.setItem('codSys', id); } catch(e) {}
@@ -2465,7 +2489,7 @@ function codiciRender(){
     alto += `<details class="cod-help"><summary>ℹ️ Come si imposta il codice</summary>${corpo}</details>`;
   }
   if (!q && sys.stati && sys.stati.length) {
-    alto += `<div class="cod-stati"><div class="cod-stati-t">Stati ${codEsc(sys.nome)}</div><div class="cod-stati-g">` +
+    alto += `<div class="cod-stati"><div class="cod-stati-t"><span>Stati ${codEsc(sys.nome)}</span><span class="share-link-btn cod-link" onclick="codiciCopia('${sys.id}')">🔗</span></div><div class="cod-stati-g">` +
       sys.stati.map(st=>`<div class="cod-chip"><b>${st.cod}</b>${codEsc(st.nome)}</div>`).join('') + '</div></div>';
   }
   document.getElementById('cod-stati').innerHTML = alto;
@@ -2495,7 +2519,7 @@ function codiciRender(){
     list.innerHTML = lines.map(l => {
       const righe = byLine.get(l);
       const ord = righe.filter(c=>!c.speciale).concat(righe.filter(c=>c.speciale));
-      return `<div class="cod-card"><div class="cod-card-h">Linea ${codEsc(l)}</div>` + ord.map(c => {
+      return `<div class="cod-card" data-linea="${codEsc(l)}"><div class="cod-card-h"><span>Linea ${codEsc(l)}</span><span class="share-link-btn cod-link" onclick="codiciCopia('${sys.id}','${codEsc(l)}')">🔗</span></div>` + ord.map(c => {
         const hit = nq && codNorm(c.nome).includes(nq);
         return `<div class="cod-row"><div class="cod-num">${c.cod}</div><div class="cod-main">` +
           `<div class="cod-name${hit?' hit':''}">${codEsc(c.nome)}${c.dir?`<span class="cod-dir">${codEsc(c.dir)}</span>`:''}</div>` +
